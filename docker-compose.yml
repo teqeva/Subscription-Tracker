@@ -1,0 +1,106 @@
+# Renewals: database + migrations + API + web page, started with ./up.sh (or make up).
+#
+# Passwords are NOT in this file or in any .env file. ./up.sh asks for them in the terminal and
+# hands them to Compose as environment variables of that one command. Compose turns each into a
+# "secret": a file mounted inside only the containers that need it.
+name: renewals
+
+# Non-secret settings shared by the migrate job and the API (a YAML "anchor", reused with "<<: *db-base").
+x-db-base: &db-base
+  DB_HOST: db                       # the service name below is the hostname inside Docker's network
+  DB_PORT: "5432"
+  DB_NAME: ${POSTGRES_DB:-renewals}
+
+secrets:
+  db_password:                      # the OWNER password (creates tables)
+    environment: POSTGRES_PASSWORD
+  app_db_password:                  # the API's limited login
+    environment: APP_DB_PASSWORD
+
+services:
+  db:
+    build: ./db
+    image: renewals-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-renewals}
+      POSTGRES_USER: ${POSTGRES_USER:-renewals}
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password   # the Postgres image reads the secret from this file
+    secrets:
+      - db_password
+      - app_db_password             # read once by db/init/01-app-role.sh
+    volumes:
+      - db-data:/var/lib/postgresql/data     # survives restarts and rebuilds
+    # No "ports:" on purpose. Only containers on this network can reach the database.
+    healthcheck:
+      # "$$" stops Compose from replacing the variable; the shell inside the container fills it in.
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  # A one-shot job: wait for a healthy database, apply the SQL migrations as the OWNER, then exit.
+  migrate:
+    build: ./backend
+    image: renewals-backend
+    command: ["python", "-m", "app.migrate"]
+    environment:
+      <<: *db-base
+      DB_USER: ${POSTGRES_USER:-renewals}
+      DB_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_password
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  backend:
+    build: ./backend
+    image: renewals-backend
+    restart: unless-stopped
+    environment:
+      <<: *db-base
+      DB_USER: renewals_app                          # limited login: rows only, no schema changes
+      DB_PASSWORD_FILE: /run/secrets/app_db_password
+    secrets:
+      - app_db_password
+    depends_on:
+      migrate:
+        condition: service_completed_successfully    # only start once migrations finished OK
+    # Hardening: read-only filesystem, no extra Linux powers, no privilege escalation.
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # The slim image has no curl, so use Python's standard library.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/readyz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${WEB_PORT:-8080}:8080"     # the only thing published to your machine
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  db-data:

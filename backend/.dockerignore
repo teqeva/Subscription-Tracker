@@ -1,0 +1,9 @@
+# Keep these out of the build context: faster builds, and secrets never end up inside an image.
+.env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/
+.git
+.gitignore

@@ -1,0 +1,8 @@
+
+# Secrets and generated files (applies to every folder in the project)
+.env
+node_modules/
+dist/
+.venv/
+__pycache__/
+.pytest_cache/
